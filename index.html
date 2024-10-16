@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Web Speech API CER 측정</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.3.0/papaparse.min.js"></script>
+</head>
+<body>
+    <h1>Web Speech API CER 측정</h1>
+    <input type="file" id="csvInput" accept=".csv">
+    <input type="file" id="folderInput" webkitdirectory directory multiple>
+    <button id="startButton" disabled>시작</button>
+    <div id="results"></div>
+
+    <script>
+        let audioFiles = [];
+        let currentIndex = 0;
+        let csvData = [];
+        let cerList = [];  // CER 값을 저장하는 배열
+        let totalCER = 0;  // 총 CER 값을 저장
+        const recognition = new webkitSpeechRecognition();
+        recognition.continuous = true;
+        recognition.lang = 'ko-KR';
+
+        document.getElementById('csvInput').addEventListener('change', handleCSVFile);
+        document.getElementById('folderInput').addEventListener('change', handleFolderSelect);
+        document.getElementById('startButton').addEventListener('click', startProcessing);
+
+        function handleCSVFile(event) {
+            const file = event.target.files[0];
+            Papa.parse(file, {
+                complete: function(results) {
+                    csvData = results.data;
+                    console.log("CSV 데이터 로드 완료", csvData);
+                    checkStartButton();
+                },
+                header: true,
+            });
+        }
+
+        function handleFolderSelect(event) {
+            const files = event.target.files;
+            const wavFiles = [];
+
+            for (let file of files) {
+                if (file.name.endsWith('.wav')) {
+                    wavFiles.push(file);
+                }
+            }
+
+            const limitedFiles = wavFiles.slice(0, 1000);
+
+            audioFiles = limitedFiles.map(wavFile => {
+                const matchingRow = csvData.find(row => row.audio_file === wavFile.name);
+                if (matchingRow) {
+                    return { file: wavFile, script: removeWhitespace(matchingRow.stt_text) };
+                }
+            }).filter(Boolean);
+
+            checkStartButton();
+        }
+
+        function checkStartButton() {
+            if (csvData.length > 0 && audioFiles.length > 0) {
+                document.getElementById('startButton').disabled = false;
+            }
+        }
+
+        function startProcessing() {
+            currentIndex = 0;
+            cerList = [];  // 초기화
+            totalCER = 0;  // 초기화
+            processNextFile();
+        }
+
+        function processNextFile() {
+            if (currentIndex >= audioFiles.length) {
+                console.log('모든 파일 처리 완료');
+                return;
+            }
+
+            const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+            const currentFile = audioFiles[currentIndex];
+
+            const reader = new FileReader();
+            reader.onload = function(e) {
+                audioContext.decodeAudioData(e.target.result, function(audioBuffer) {
+                    const source = audioContext.createBufferSource();
+                    source.buffer = audioBuffer;
+                    source.connect(audioContext.destination);
+                    recognition.start();
+                    source.start();
+                    source.onended = () => {
+                        
+                    };
+                });
+            };
+            reader.readAsArrayBuffer(currentFile.file);
+        }
+
+        recognition.onresult = (event) => {
+            const result = removeWhitespace(event.results[0][0].transcript);
+            const currentFile = audioFiles[currentIndex];
+            const cer = calculateCER(result, currentFile.script);
+
+            // CER 값을 배열과 총합에 추가
+            cerList.push(cer);
+            totalCER += cer;
+
+            // 처리 결과 출력
+            displayResult(currentFile.file.name, result, currentFile.script, cer);
+
+            currentIndex++;
+
+            // 10개의 파일이 처리될 때마다 평균 CER 출력
+            if (currentIndex % 10 === 0) {
+                const averageCER = totalCER / currentIndex;
+                displayAverageCER(averageCER);
+            }
+        };
+
+        recognition.onend = () => {
+            if (currentIndex < audioFiles.length) {
+                recognition.stop();
+                setTimeout(processNextFile, 1000);
+            }
+        };
+
+        function displayResult(file, sttResult, originalScript, cer) {
+            const resultsDiv = document.getElementById('results');
+            resultsDiv.innerHTML += `
+                <p><strong>파일:</strong> ${file}</p>
+                <p><strong>STT 결과:</strong> ${sttResult}</p>
+                <p><strong>원본 텍스트:</strong> ${originalScript}</p>
+                <p><strong>CER:</strong> ${cer}</p>
+                <hr>`;
+        }
+
+        // 평균 CER 출력
+        function displayAverageCER(averageCER) {
+            const resultsDiv = document.getElementById('results');
+            resultsDiv.innerHTML += `
+                <p><strong>현재까지의 평균 CER (10개마다):</strong> ${averageCER}</p>
+                <hr>`;
+        }
+
+        function calculateCER(recognized, actual) {
+            const recognizedLength = recognized.length;
+            const actualLength = actual.length;
+
+            const dp = Array.from(Array(recognizedLength + 1), () => Array(actualLength + 1).fill(0));
+
+            for (let i = 0; i <= recognizedLength; i++) dp[i][0] = i;
+            for (let j = 0; j <= actualLength; j++) dp[0][j] = j;
+
+            for (let i = 1; i <= recognizedLength; i++) {
+                for (let j = 1; j <= actualLength; j++) {
+                    if (recognized[i - 1] === actual[j - 1]) {
+                        dp[i][j] = dp[i - 1][j - 1];
+                    } else {
+                        dp[i][j] = Math.min(
+                            dp[i - 1][j - 1] + 1,
+                            dp[i - 1][j] + 1,
+                            dp[i][j - 1] + 1
+                        );
+                    }
+                }
+            }
+
+            const levenshteinDistance = dp[recognizedLength][actualLength];
+            return levenshteinDistance / actualLength;
+        }
+
+        function removeWhitespace(text) {
+            return text.replace(/\s+/g, '');
+        }
+    </script>
+</body>
+</html>
